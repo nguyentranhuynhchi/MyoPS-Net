@@ -2,7 +2,10 @@ import torch
 import random
 import numpy as np
 import torch.nn as nn
-from torchvision import transforms
+try:
+    from torchvision import transforms
+except ImportError:
+    transforms = None
 from skimage.transform import resize
 
 

@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Teamwork & Agent runs
+.agents/
+
+# Checkpoints & predictions
+checkpoints/
+*.pth
+*.pt
+test_predictions/
+output/
+test/
+
+# Logs & temp
+*.log
+*.tmp
+.pytest_cache/
