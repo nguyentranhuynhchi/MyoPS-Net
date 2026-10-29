@@ -4,7 +4,7 @@
 MyoPS-Net is adapted to the MyoPS380 benchmark protocol (`myops380_train304_test76_last_v1`) matching the reference implementation in SCAR:
 - **Input Data Pipeline**: Loads 3-modality (bSSFP, LGE, T2w) aligned slices/volumes from `D:\nckh_model\Dataset\MyoPS380\Processed_data`. Applies zero-padding for 2 missing modalities (T1m, T2starm) to satisfy MyoPS-Net's 5-branch architecture. Applies SCAR's exact `RandomGenerator` augmentation.
 - **Target Adapter & Loss**: Maps canonical 4-class labels (0:BG, 1:Normal Myo, 2:Edema, 3:Scar) to 3 target dictionaries (`cardiac`, `scar`, `edema`) compatible with native `MyoPSLoss`. Hardens `WCELoss` against class-absence dimensional mismatches and zero division.
-- **Training Engine**: Fixed 300 epochs, no validation (`no_val=True`), effective batch size 16 (microbatching with sample-weighted accumulation), AdamW (`weight_decay=1e-4`), step-level Polynomial LR Decay (power=0.9), seed=1234, saving atomic `last.pth`.
+- **Training Engine**: Fixed 300 epochs, no validation (`no_val=True`), effective batch size 16 (microbatching with sample-weighted accumulation), AdamW (`weight_decay=1e-4`), step-level Polynomial LR Decay (power=0.9), seed=1098, saving atomic `last.pth`.
 - **Inference & Evaluation**: Single-pass forward + argmax on 76 test volumes from `test_vol.txt`, morphological post-processing removed, exports 3D uint8 `(128, 128, D)` predictions to `test_predictions/{CaseID}_pred.npz` (key `'prediction'`), evaluated via SCAR's shared evaluator (`surface_distance.py`, protocol `myops380_voxel_v3`), producing `metrics.json` and `per_case.csv`.
 
 ---
@@ -18,7 +18,7 @@ MyoPS-Net is adapted to the MyoPS380 benchmark protocol (`myops380_train304_test
 | F4 | Validation Elimination | Completely eliminate validation loader, validation dataset, and per-epoch validation loop | M1 | Promt_train_test_no_val.txt §1, SCAR no_val protocol |
 | F5 | Target Adapter | Convert canonical 4 classes (0:BG, 1:Normal Myo, 2:Edema, 3:Scar) to 3 targets (`cardiac`, `scar`, `edema`) for `MyoPSLoss`, and reverse mapping for predictions | M2 | Promt_train_test_no_val.txt §3, MyoPS-Net loss.py |
 | F6 | WCELoss Bug Fix | Fix zero-division and tensor size mismatch in `WCELoss.weight_function` for absent classes, respecting target device | M2 | Explorer & Spec Miner findings, network/criterion/loss.py |
-| F7 | Optimizer & Scheduler | AdamW (weight_decay=1e-4, 0.0 for 1D/norm/bias), step-level Polynomial LR Decay (power=0.9), seed=1234, deterministic flags | M3 | Promt_train_test_no_val.txt §4, SCAR trainer.py |
+| F7 | Optimizer & Scheduler | AdamW (weight_decay=1e-4, 0.0 for 1D/norm/bias), step-level Polynomial LR Decay (power=0.9), seed=1098, deterministic flags | M3 | Promt_train_test_no_val.txt §4, SCAR trainer.py |
 | F8 | Batch Accumulation & Checkpoint | Target effective batch size 16 with sample-weighted accumulation, save atomic `last.pth` at epoch 300, no best checkpoint | M3 | Promt_train_test_no_val.txt §4-5, SCAR trainer.py |
 | F9 | Test Inference Pipeline | Single-pass argmax without morphological post-processing, export `test_predictions/{CaseID}_pred.npz` (uint8, 128x128xD, key 'prediction') | M4 | Promt_train_test_no_val.txt §6, MyoPS-Net predict.py |
 | F10 | Shared Evaluator | Shared evaluator calling SCAR `surface_distance.py` (`dataset_rows`, `summarize_dataset_rows`, `myops380_voxel_v3`), export `metrics.json`, `per_case.csv` | M4 | Promt_train_test_no_val.txt §6, SCAR surface_distance.py |

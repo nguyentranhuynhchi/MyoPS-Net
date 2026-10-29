@@ -10,7 +10,7 @@ Strictly adheres to:
   - F4: Strict no-validation protocol (no val loader, no val loop, no best.pth)
   - F5: Target Adapter (canonical 4-class -> cardiac, scar, edema)
   - F6: Hardened MyoPSLoss (WCE zero-division protection)
-  - F7: Grouped AdamW (wd=1e-4), step-level Polynomial LR Decay (power=0.9), seed=1234
+  - F7: Grouped AdamW (wd=1e-4), step-level Polynomial LR Decay (power=0.9), seed=1098
   - F8: Effective batch size 16 with sample-weighted gradient accumulation, atomic last.pth
 """
 from __future__ import annotations
@@ -57,7 +57,7 @@ def weights_init(m: nn.Module) -> None:
             nn.init.constant_(m.bias, 0)
 
 
-def set_seed(seed: int = 1234, deterministic: bool = True) -> None:
+def set_seed(seed: int = 1098, deterministic: bool = True) -> None:
     """Sets random seeds across Python, NumPy, PyTorch, and CUDA for deterministic execution."""
     random.seed(seed)
     np.random.seed(seed)
@@ -523,8 +523,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seed",
         type=int,
-        default=1234,
-        help="Random seed for reproducibility (default: 1234).",
+        default=1098,
+        help="Random seed for reproducibility (default: 1098).",
     )
     parser.add_argument(
         "--num_workers",

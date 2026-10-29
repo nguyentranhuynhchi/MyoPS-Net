@@ -375,7 +375,7 @@ def build_myops380_dataloader(
     batch_size: int | None = None,
     num_workers: int | None = None,
     pin_memory: bool | None = None,
-    seed: int = 1234,
+    seed: int = 1098,
     **kwargs: Any,
 ) -> DataLoader:
     """Builds a standardized PyTorch DataLoader for MyoPS380.
