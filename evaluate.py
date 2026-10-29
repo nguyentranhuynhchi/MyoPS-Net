@@ -35,13 +35,15 @@ from network.model import MyoPSNet
 
 
 def load_scar_surface_distance_module(scar_path: str | Path | None = None):
-    """Dynamically loads SCAR's training/metrics/surface_distance.py."""
+    """Dynamically loads SCAR's training/metrics/surface_distance.py or local fallback."""
     candidates = []
     if scar_path is not None:
         candidates.append(Path(scar_path))
     candidates.extend([
+        Path(__file__).resolve().parent / "utils" / "surface_distance.py",
         Path(r"D:\nckh_model\SCAR\training\metrics\surface_distance.py"),
         Path(r"../SCAR/training/metrics/surface_distance.py"),
+        Path(r"/content/SCAR/training/metrics/surface_distance.py"),
     ])
 
     for p in candidates:
@@ -273,10 +275,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=r"D:\nckh_model\Dataset\MyoPS380\Processed_data",
         help="Path to preprocessed MyoPS380 dataset directory.",
     )
+    local_splits = Path(__file__).resolve().parent / "dataset" / "splits" / "myops380_no_val"
+    default_split_dir = str(local_splits) if local_splits.is_dir() else r"D:\nckh_model\SCAR\preprocessing\splits\myops380_no_val"
     parser.add_argument(
         "--split_dir",
         type=str,
-        default=r"D:\nckh_model\SCAR\preprocessing\splits\myops380_no_val",
+        default=default_split_dir,
         help="Path to split manifests directory (test_vol.txt).",
     )
     parser.add_argument(
@@ -285,10 +289,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=r"test_predictions",
         help="Directory to save prediction .npz files and evaluation results.",
     )
+    local_sd = Path(__file__).resolve().parent / "utils" / "surface_distance.py"
+    default_sd = str(local_sd) if local_sd.is_file() else r"D:\nckh_model\SCAR\training\metrics\surface_distance.py"
     parser.add_argument(
         "--scar_surface_distance",
         type=str,
-        default=r"D:\nckh_model\SCAR\training\metrics\surface_distance.py",
+        default=default_sd,
         help="Path to SCAR surface_distance.py metric module.",
     )
     parser.add_argument(

@@ -17,7 +17,7 @@ import torch.nn.functional as F
 # Authoritative path constants
 SCAR_ROOT = r"D:\nckh_model\SCAR"
 if os.path.exists(SCAR_ROOT) and SCAR_ROOT not in sys.path:
-    sys.path.insert(0, SCAR_ROOT)
+    sys.path.append(SCAR_ROOT)
 
 SCAR_SPLIT_DIR = r"D:\nckh_model\SCAR\preprocessing\splits\myops380_no_val"
 PROCESSED_DATA_DIR = r"D:\nckh_model\Dataset\MyoPS380\Processed_data"

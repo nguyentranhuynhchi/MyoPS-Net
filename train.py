@@ -470,10 +470,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=r"D:\nckh_model\Dataset\MyoPS380\Processed_data",
         help="Path to preprocessed MyoPS380 dataset directory (alias: --data_dir).",
     )
+    local_splits = Path(__file__).resolve().parent / "dataset" / "splits" / "myops380_no_val"
+    default_split_dir = str(local_splits) if local_splits.is_dir() else r"D:\nckh_model\SCAR\preprocessing\splits\myops380_no_val"
     parser.add_argument(
         "--split_dir",
         type=str,
-        default=r"D:\nckh_model\SCAR\preprocessing\splits\myops380_no_val",
+        default=default_split_dir,
         help="Path to split manifests directory (train.txt, test_vol.txt).",
     )
     parser.add_argument(
