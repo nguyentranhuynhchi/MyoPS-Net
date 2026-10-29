@@ -32,6 +32,7 @@ import torch.nn as nn
 from dataset.myops380_dataset import MyoPS380TestVolumeDataset, extract_patient_id
 from dataset.target_adapter import myops_outputs_to_canonical
 from network.model import MyoPSNet
+from utils.paths import resolve_data_root, resolve_split_dir
 
 
 def load_scar_surface_distance_module(scar_path: str | Path | None = None):
@@ -113,15 +114,17 @@ def single_pass_volume_inference(
 def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     """Executes full evaluation on the 76 test volumes."""
     device = torch.device(args.device if torch.cuda.is_available() and args.device == "cuda" else "cpu")
-    checkpoint_path = Path(args.checkpoint)
-    output_dir = Path(args.output_dir)
+    checkpoint_path = Path(args.checkpoint if args.checkpoint else "checkpoints/last.pth")
+    output_dir = Path(args.output_dir if args.output_dir else "test_predictions")
     output_dir.mkdir(parents=True, exist_ok=True)
+    data_root = resolve_data_root(getattr(args, "data_root", None))
+    split_dir = resolve_split_dir(getattr(args, "split_dir", None))
 
     print("================================================================================")
     print("  MyoPS-Net Shared Evaluator — Protocol: myops380_train304_test76_last_v1")
     print(f"  Checkpoint Path : {checkpoint_path}")
-    print(f"  Data Root       : {args.data_root}")
-    print(f"  Split Dir       : {args.split_dir}")
+    print(f"  Data Root       : {data_root}")
+    print(f"  Split Dir       : {split_dir}")
     print(f"  Output Dir      : {output_dir}")
     print(f"  Device          : {device}")
     print("================================================================================")
@@ -159,11 +162,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
 
     # 4. Load test dataset (76 test volumes)
     test_dataset = MyoPS380TestVolumeDataset(
-        data_dir=args.data_root,
-        split_dir=args.split_dir,
+        data_dir=data_root,
+        split_dir=split_dir,
         split="test_vol",
     )
-    print(f"Loaded {len(test_dataset)} test patient volumes from {args.split_dir}/test_vol.txt.")
+    print(f"Loaded {len(test_dataset)} test patient volumes from {split_dir}/test_vol.txt.")
 
     # 5. Run inference and shared evaluation
     all_rows = []

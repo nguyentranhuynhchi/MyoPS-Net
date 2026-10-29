@@ -37,6 +37,7 @@ from dataset.myops380_dataset import MyoPS380TrainDataset
 from dataset.target_adapter import canonical_to_myops_targets
 from network.criterion.loss import MyoPSLoss
 from network.model import MyoPSNet
+from utils.paths import resolve_data_root, resolve_split_dir, resolve_save_dir
 def weights_init(m: nn.Module) -> None:
     """Initializes Conv2d, BatchNorm2d, and Linear layer weights."""
     classname = m.__class__.__name__
@@ -290,12 +291,11 @@ def train(args: argparse.Namespace) -> None:
     device = torch.device(args.device if torch.cuda.is_available() and args.device == "cuda" else "cpu")
     print(f"Using device: {device} (CUDA available: {torch.cuda.is_available()})")
 
-    # Paths
-    data_root_path = getattr(args, "data_root", None) or getattr(args, "data_dir", None) or r"D:\nckh_model\Dataset\MyoPS380\Processed_data"
-    data_root = Path(data_root_path)
-    split_dir = Path(args.split_dir)
-    save_dir = Path(args.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
+    # Paths (robustly resolves even if empty strings are passed from unset shell variables)
+    raw_data_root = getattr(args, "data_root", None) or getattr(args, "data_dir", None)
+    data_root = resolve_data_root(raw_data_root)
+    split_dir = resolve_split_dir(getattr(args, "split_dir", None))
+    save_dir = resolve_save_dir(getattr(args, "save_dir", None))
     checkpoint_path = save_dir / "last.pth"
 
     print("================================================================================")
