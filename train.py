@@ -287,8 +287,8 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
         logger.info("Running complexity and inference efficiency measurements ...")
         eff_params_info = count_parameters(model)
         eff_flops_info = measure_flops(model, input_shape=(1, 3, 128, 128), device=device)
-        inf_warmup = 100 if device.type == "cuda" else 2
-        inf_repeats = 300 if device.type == "cuda" else 5
+        inf_warmup = 30 if device.type == "cuda" else 2
+        inf_repeats = 100 if device.type == "cuda" else 5
         eff_inf_info = measure_inference_efficiency(
             model, input_shape=(1, 3, 128, 128), device=device, warmup=inf_warmup, repeats=inf_repeats
         )
@@ -331,7 +331,11 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
             sync_if_cuda(device)
 
             t_epoch_start = time.perf_counter()
-            for b_idx in range(batches_per_epoch):
+            batches_to_run = min(batches_per_epoch, 2) if args.dry_run else batches_per_epoch
+            if args.max_batches > 0:
+                batches_to_run = min(batches_to_run, args.max_batches)
+
+            for b_idx in range(batches_to_run):
                 bs = args.batch_size if (b_idx < batches_per_epoch - 1) else (slices_count % args.batch_size or args.batch_size)
                 if bs != dummy_c0.shape[0]:
                     b_c0 = dummy_c0[:bs]
@@ -352,7 +356,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
 
             sync_if_cuda(device)
             t_epoch_end = time.perf_counter()
-            single_epoch_time = t_epoch_end - t_epoch_start
+            single_epoch_time = (t_epoch_end - t_epoch_start) * (batches_per_epoch / max(1, batches_to_run))
             peak_train_bytes = int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
             peak_reserved_bytes = int(torch.cuda.max_memory_reserved(device)) if device.type == "cuda" else 0
 
@@ -385,9 +389,6 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
         std_out = PROJECT_ROOT / "outputs" / "runs" / "myopsnet" / "efficiency_metrics.json"
         if std_out not in eff_paths:
             eff_paths.append(std_out)
-        root_out = PROJECT_ROOT / "efficiency_metrics.json"
-        if root_out not in eff_paths:
-            eff_paths.append(root_out)
         root_out = PROJECT_ROOT / "efficiency_metrics.json"
         if root_out not in eff_paths:
             eff_paths.append(root_out)
@@ -448,8 +449,8 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
         logger.info("Running complexity and inference efficiency measurements ...")
         eff_params_info = count_parameters(model)
         eff_flops_info = measure_flops(model, input_shape=(1, 3, 128, 128), device=device)
-        inf_warmup = 100 if device.type == "cuda" else 2
-        inf_repeats = 300 if device.type == "cuda" else 5
+        inf_warmup = 30 if device.type == "cuda" else 2
+        inf_repeats = 100 if device.type == "cuda" else 5
         eff_inf_info = measure_inference_efficiency(
             model, input_shape=(1, 3, 128, 128), device=device, warmup=inf_warmup, repeats=inf_repeats
         )

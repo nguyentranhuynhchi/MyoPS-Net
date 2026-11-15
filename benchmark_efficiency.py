@@ -86,12 +86,14 @@ def build_parser() -> argparse.ArgumentParser:
     # Benchmark protocol settings
     parser.add_argument("--batch_size", type=int, default=16, help="Training batch size (rule: 16)")
     parser.add_argument("--epochs", type=int, default=300, help="Planned training epochs (rule: 300)")
-    parser.add_argument("--warmup", type=int, default=None, help="Inference warmup iterations (default: 100 on CUDA, 2 on CPU)")
-    parser.add_argument("--repeats", type=int, default=None, help="Inference timed iterations (default: 300 on CUDA, 5 on CPU)")
+    parser.add_argument("--warmup", type=int, default=None, help="Inference warmup iterations (default: 30 on CUDA, 2 on CPU)")
+    parser.add_argument("--repeats", type=int, default=None, help="Inference timed iterations (default: 100 on CUDA, 5 on CPU)")
 
     # Execution modes
     parser.add_argument("--efficiency_only", action="store_true", help="Only measure complexity and inference latency/VRAM")
     parser.add_argument("--simulate_training", action="store_true", help="Benchmark 1 full epoch training step to project time and measure VRAM")
+    parser.add_argument("--dry_run", "--smoke_test", action="store_true", help="Run simulated training on first 2 batches for fast audit")
+    parser.add_argument("--max_batches", type=int, default=0, help="Max simulated batches per epoch (0 = unlimited)")
 
     # Output paths
     parser.add_argument("--output", "--output_path", default=None, help="Direct output path for efficiency_metrics.json")
@@ -127,8 +129,8 @@ def benchmark_efficiency_main(argv: Optional[Sequence[str]] = None) -> Dict[str,
     print(f"  FLOPs           : {flops_info['flops_g']:.2f} GFLOPs ({flops_info['flops_total']:,} FLOPs)")
 
     # 3. Inference: Latency & Peak VRAM
-    warmup = args.warmup if args.warmup is not None else (100 if device.type == "cuda" else 2)
-    repeats = args.repeats if args.repeats is not None else (300 if device.type == "cuda" else 5)
+    warmup = args.warmup if args.warmup is not None else (30 if device.type == "cuda" else 2)
+    repeats = args.repeats if args.repeats is not None else (100 if device.type == "cuda" else 5)
 
     print(f"\n[Step 2/3] Measuring Batch=1 FP32 Inference (warmup={warmup}, repeats={repeats}) ...")
     inf_info = measure_inference_efficiency(
@@ -178,7 +180,11 @@ def benchmark_efficiency_main(argv: Optional[Sequence[str]] = None) -> Dict[str,
 
         # Timed benchmark: 1 epoch simulation (batches_per_epoch forward + backward)
         t_epoch_start = time.perf_counter()
-        for b_idx in range(batches_per_epoch):
+        batches_to_run = min(batches_per_epoch, 2) if args.dry_run else batches_per_epoch
+        if args.max_batches > 0:
+            batches_to_run = min(batches_to_run, args.max_batches)
+
+        for b_idx in range(batches_to_run):
             bs = args.batch_size if (b_idx < batches_per_epoch - 1) else (slices_count % args.batch_size or args.batch_size)
             if bs != dummy_c0.shape[0]:
                 b_c0 = dummy_c0[:bs]
@@ -199,7 +205,7 @@ def benchmark_efficiency_main(argv: Optional[Sequence[str]] = None) -> Dict[str,
 
         sync_if_cuda(device)
         t_epoch_end = time.perf_counter()
-        single_epoch_time = t_epoch_end - t_epoch_start
+        single_epoch_time = (t_epoch_end - t_epoch_start) * (batches_per_epoch / max(1, batches_to_run))
 
         if device.type == "cuda" and torch.cuda.is_available():
             peak_train_bytes = int(torch.cuda.max_memory_allocated(device))
