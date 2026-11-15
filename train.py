@@ -30,7 +30,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from criterion.loss import MyoPSLoss
 from dataset.augmentation import RandomGenerator
-from dataset.myops380_dataset import create_myops380_train_loader
+from dataset.myops380_dataset import (
+    create_myops380_train_loader,
+    create_myops_train_loader,
+    normalize_dataset_name,
+)
 from network.model import MyoPSNetL
 from training.checkpoint import (
     atomic_save_checkpoint,
@@ -52,6 +56,16 @@ from training.optimizer import (
 )
 from training.provenance import (
     INITIALIZATION, LOSS_CONTRACT, MODEL_CONTRACT, RNG_POLICY, build_resume_contract,
+)
+from utils.efficiency import (
+    build_efficiency_payload,
+    check_rule_compliance,
+    count_parameters,
+    measure_flops,
+    measure_inference_efficiency,
+    save_efficiency_report,
+    summarize_training_efficiency,
+    sync_if_cuda,
 )
 from utils.tools import create_multi_head_targets, weights_init
 
@@ -124,12 +138,19 @@ def resolve_amp_dtype(amp_mode: str, device: torch.device) -> Optional[torch.dty
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI parser for training pipeline."""
     parser = argparse.ArgumentParser(
-        description="Standardized Training Pipeline for MyoPS-Net on MyoPS380",
+        description="Standardized Training Pipeline for MyoPS-Net",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    # Dataset selection
+    parser.add_argument(
+        "--dataset",
+        default="myops380",
+        choices=["myops380", "myopspp", "myopspp_unet2d_roi128_1mm"],
+        help="Dataset choice: myops380 or myopspp",
+    )
     # Data paths
-    parser.add_argument("--data_root", "--data-root", default="D:/NCKH/Dataset/MyoPS380/Processed_data")
-    parser.add_argument("--split_dir", "--list_dir", default="D:/NCKH/SCAR/preprocessing/splits/myops380_no_val")
+    parser.add_argument("--data_root", "--data-root", default=None, help="Dataset root directory")
+    parser.add_argument("--split_dir", "--list_dir", default=None, help="Split manifest directory")
     parser.add_argument("--run_dir", "--output_dir", default=None)
 
     # Training recipe
@@ -149,6 +170,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pin_memory", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True)
 
+    # Efficiency benchmarking
+    parser.add_argument("--measure_efficiency", action="store_true", help="Measure and export 7 computational efficiency metrics")
+    parser.add_argument("--efficiency_output", default=None, help="Output path for efficiency_metrics.json")
+    parser.add_argument("--efficiency_only", action="store_true", help="Only measure complexity and inference, without full training")
+
     # Checkpoint & logging
     parser.add_argument("--resume", default=None, help="Path to checkpoint file or 'auto'")
     parser.add_argument("--save_interval", type=int, default=1, help="Periodic checkpoint save frequency (epochs)")
@@ -158,6 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=True)
 
     # Fast verification / testing
+    parser.add_argument("--strict", action=argparse.BooleanOptionalAction, default=False, help="Strictly enforce expected slice/patient counts")
     parser.add_argument("--dry_run", "--smoke_test", action="store_true", help="Run 1 epoch of 2 batches for fast CI check")
     parser.add_argument("--max_batches", type=int, default=0, help="Max batches per epoch (0 = unlimited)")
 
@@ -176,6 +203,46 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     if args.accum_steps != 1:
         parser.error("This multi-head training recipe requires --accum_steps 1")
     resuming = args.resume is not None and str(args.resume).strip() != ""
+
+    dataset = normalize_dataset_name(args.dataset)
+
+    # Protocol & Label settings
+    if dataset == "myopspp":
+        protocol_id = "myopspp_train64_test16_last_v1"
+        target_mode = "canonical"
+    else:
+        protocol_id = "myops380_train304_test76_last_v1"
+        target_mode = "legacy"
+
+    # Resolve Data paths
+    if args.data_root is not None:
+        data_root = Path(args.data_root)
+    else:
+        if dataset == "myopspp":
+            data_root = Path(os.environ.get("MYOPSPP_DATA_ROOT", "D:/NCKH/Dataset/MyoPSpp_UNet2D_ROI128_1mm"))
+        else:
+            data_root = Path(os.environ.get("MYOPS380_DATA_ROOT", "D:/NCKH/Dataset/MyoPS380/Processed_data"))
+
+    if args.split_dir is not None:
+        split_dir = Path(args.split_dir)
+    else:
+        if dataset == "myopspp":
+            candidates = [
+                PROJECT_ROOT / "lists" / "lists_MyoPSpp",
+                PROJECT_ROOT / "preprocessing" / "splits" / "myopspp_bc80_no_val",
+                Path("D:/NCKH/SCAR/preprocessing/splits/myopspp_bc80_no_val"),
+            ]
+            split_dir = next((c for c in candidates if c.is_dir()), candidates[0])
+        else:
+            candidates = [
+                PROJECT_ROOT / "preprocessing" / "splits" / "myops380_no_val",
+                Path("D:/NCKH/SCAR/preprocessing/splits/myops380_no_val"),
+            ]
+            split_dir = next((c for c in candidates if c.is_dir()), candidates[0])
+
+    args.data_root = str(data_root)
+    args.split_dir = str(split_dir)
+    args.dataset = dataset
 
     # 1. Output directory setup
     if args.run_dir is None:
@@ -205,27 +272,30 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
 
     logger.info("=" * 70)
     logger.info("MyoPS-Net Standardized Training Pipeline")
-    logger.info("Protocol: myops380_train304_test76_last_v1 | Opt Protocol: %s", OPTIMIZATION_PROTOCOL["id"])
+    logger.info("Dataset: %s | Protocol: %s | Opt Protocol: %s", dataset, protocol_id, OPTIMIZATION_PROTOCOL["id"])
+    logger.info("Target Mode: %s | Split dir: %s", target_mode, split_dir)
     logger.info("Run directory: %s", run_dir)
     logger.info("Device: %s | AMP: %s (%s)", device, amp_mode, amp_dtype)
     logger.info("Seed: %d | Batch size: %d | Planned epochs: %d", args.seed, args.batch_size, args.epochs)
     logger.info("=" * 70)
 
     # 3. DataLoader creation
-    split_file = Path(args.split_dir) / "train.txt"
+    split_file = split_dir / "train.txt"
     transform = RandomGenerator(output_size=[128, 128])
 
     loader_generator = torch.Generator()
     loader_generator.manual_seed(args.seed)
 
-    train_loader = create_myops380_train_loader(
+    train_loader = create_myops_train_loader(
         split_file=split_file,
-        data_root=args.data_root,
+        data_root=data_root,
+        dataset=dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=pin_memory,
         transform=transform,
+        strict=args.strict,
         generator=loader_generator,
     )
     batches_per_epoch = len(train_loader)
@@ -244,6 +314,55 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     total_updates = calculate_total_updates(args.epochs, batches_per_epoch, args.accum_steps)
     scheduler = build_scheduler(optimizer, total_updates=total_updates)
     scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and amp_dtype == torch.float16))
+
+    # Efficiency benchmarking initialization (if requested)
+    eff_params_info = None
+    eff_flops_info = None
+    eff_inf_info = None
+    eff_rule_ok = False
+    eff_warnings: list[str] = []
+    eff_hw_info: dict[str, Any] = {}
+    epoch_times_measured: list[float] = []
+
+    if args.measure_efficiency or args.efficiency_only:
+        logger.info("Running complexity and inference efficiency measurements ...")
+        eff_params_info = count_parameters(model)
+        eff_flops_info = measure_flops(model, input_shape=(1, 3, 128, 128), device=device)
+        inf_warmup = 100 if device.type == "cuda" else 2
+        inf_repeats = 300 if device.type == "cuda" else 5
+        eff_inf_info = measure_inference_efficiency(
+            model, input_shape=(1, 3, 128, 128), device=device, warmup=inf_warmup, repeats=inf_repeats
+        )
+        eff_rule_ok, eff_warnings, eff_hw_info = check_rule_compliance(
+            device=device,
+            amp_mode=amp_mode,
+            num_workers=args.num_workers,
+            pin_memory=pin_memory,
+            batch_size=args.batch_size,
+            planned_epochs=args.epochs,
+        )
+        if args.efficiency_only:
+            payload = build_efficiency_payload(
+                model_name="MyoPS-Net",
+                model_id="myopsnet",
+                seed=args.seed,
+                dataset=dataset,
+                params_info=eff_params_info,
+                flops_info=eff_flops_info,
+                inference_info=eff_inf_info,
+                training_info=None,
+                rule_compliant=eff_rule_ok,
+                compliance_warnings=eff_warnings,
+                hardware_info=eff_hw_info,
+            )
+            eff_paths = [log_dir / "efficiency_metrics.json", run_dir / "efficiency_metrics.json"]
+            if args.efficiency_output:
+                eff_paths.append(Path(args.efficiency_output).resolve())
+            std_out = PROJECT_ROOT / "outputs" / "runs" / "myopsnet" / "efficiency_metrics.json"
+            if std_out not in eff_paths:
+                eff_paths.append(std_out)
+            save_efficiency_report(payload, eff_paths, summary_text_paths=[log_dir / "efficiency_summary.txt"], log=logger)
+            return {"training_complete": False, "efficiency_metrics": payload}
 
     # 5. Handle Resumption
     start_epoch = 0
@@ -285,8 +404,12 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
             raise FileNotFoundError(f"Resume checkpoint not found: {resume_target}")
 
     # Write config metadata
+    model_contract = dict(MODEL_CONTRACT)
+    if dataset == "myopspp":
+        model_contract["source_label_order"] = "canonical_background_normal_edema_scar"
     config_record = {
-        "protocol_id": "myops380_train304_test76_last_v1",
+        "dataset": dataset,
+        "protocol_id": protocol_id,
         "optimization_protocol": OPTIMIZATION_PROTOCOL,
         "args": vars(args),
         "total_updates": total_updates,
@@ -294,7 +417,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
         "device": str(device),
         "amp_mode": amp_mode,
         "amp_dtype": str(amp_dtype),
-        "model_contract": MODEL_CONTRACT,
+        "model_contract": model_contract,
         "initialization": INITIALIZATION,
         "loss_contract": LOSS_CONTRACT,
         "rng_policy": RNG_POLICY,
@@ -340,7 +463,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
             label = batch["label"].to(device, non_blocking=pin_memory)
             B = label.shape[0]
 
-            target_C0, target_LGE, target_T2 = create_multi_head_targets(label)
+            target_C0, target_LGE, target_T2 = create_multi_head_targets(label, mode=target_mode)
 
             amp_enabled = (use_amp and device.type == "cuda")
             with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
@@ -398,7 +521,9 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
                     current_lr, global_step
                 )
 
+        sync_if_cuda(device)
         epoch_duration = time.perf_counter() - epoch_start_time
+        epoch_times_measured.append(epoch_duration)
         completed_epochs = epoch + 1
         mean_loss = running_loss_total / max(sample_count, 1)
         mean_seg = running_loss_seg / max(sample_count, 1)
@@ -436,10 +561,12 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
                 amp_skipped_updates=amp_skipped_updates,
                 loader_generator=loader_generator,
                 resume_contract=resume_contract,
-                model_contract=MODEL_CONTRACT,
+                model_contract=model_contract,
                 initialization=INITIALIZATION,
                 loss_contract=LOSS_CONTRACT,
                 rng_policy=RNG_POLICY,
+                protocol_id=protocol_id,
+                dataset=dataset,
             )
 
         # Record tabular metrics
@@ -477,6 +604,46 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
 
     is_complete = (completed_epochs >= args.epochs)
     logger.info("Training session finished. Checkpoint: %s (completed: %s)", checkpoint_path, is_complete)
+
+    # 7. Finalize and export efficiency metrics if requested
+    if args.measure_efficiency:
+        logger.info("Finalizing computational efficiency metrics report ...")
+        peak_bytes = int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
+        peak_reserved = int(torch.cuda.max_memory_reserved(device)) if device.type == "cuda" else 0
+        training_info = summarize_training_efficiency(
+            epoch_times_s=epoch_times_measured,
+            total_wall_clock_s=sum(epoch_times_measured),
+            peak_vram_bytes=peak_bytes,
+            planned_epochs=args.epochs,
+            warmup_epochs=5,
+            peak_reserved_bytes=peak_reserved,
+        )
+        eff_payload = build_efficiency_payload(
+            model_name="MyoPS-Net",
+            model_id="myopsnet",
+            seed=args.seed,
+            dataset=dataset,
+            params_info=eff_params_info,
+            flops_info=eff_flops_info,
+            inference_info=eff_inf_info,
+            training_info=training_info,
+            rule_compliant=eff_rule_ok,
+            compliance_warnings=eff_warnings,
+            hardware_info=eff_hw_info,
+        )
+        eff_paths = [log_dir / "efficiency_metrics.json", run_dir / "efficiency_metrics.json"]
+        if args.efficiency_output:
+            eff_paths.append(Path(args.efficiency_output).resolve())
+        std_out = PROJECT_ROOT / "outputs" / "runs" / "myopsnet" / "efficiency_metrics.json"
+        if std_out not in eff_paths:
+            eff_paths.append(std_out)
+        save_efficiency_report(
+            eff_payload,
+            eff_paths,
+            summary_text_paths=[log_dir / "efficiency_summary.txt", run_dir / "efficiency_summary.txt"],
+            log=logger,
+        )
+
     return {
         "completed_epochs": completed_epochs,
         "global_step": global_step,

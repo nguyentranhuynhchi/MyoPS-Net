@@ -20,7 +20,10 @@ except ImportError:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import transforms
+try:
+    from torchvision import transforms
+except ImportError:
+    transforms = None
 
 
 def weights_init(m: nn.Module) -> None:

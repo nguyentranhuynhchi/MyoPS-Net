@@ -1,23 +1,27 @@
-"""MyoPS380 Dataset Classes for Standardized Benchmark Protocol.
+"""MyoPS Dataset Classes for Standardized Benchmark Protocols.
 ============================================================
-Protocol: myops380_train304_test76_last_v1
+Protocols:
+  - MyoPS380: myops380_train304_test76_last_v1
+  - MyoPS++:  myopspp_train64_test16_last_v1 (myopspp_unet2d_roi128_1mm)
+
 Interface contracts:
-  - MyoPS380TrainDataset:
-      Input: split_file (train.txt), data_root (Processed_data), transform=None
+  - MyoPSTrainDataset (MyoPS380TrainDataset alias):
+      Input: split_file (train.txt), data_root (Processed_data), transform=None, dataset="myops380"
       Yields: dict with keys:
         'bSSFP': torch.FloatTensor (1, 128, 128)
         'LGE':   torch.FloatTensor (1, 128, 128)
         'T2w':   torch.FloatTensor (1, 128, 128)
         'label': torch.LongTensor (128, 128) with values in {0, 1, 2, 3}
-        'case_slice': str ID, e.g. 'case0002_slice000'
-  - MyoPS380TestDataset:
-      Input: split_file (test_vol.txt), data_root (Processed_data)
+        'case_slice': str ID, e.g. 'case0002_slice000' or 'Case2001_slice000'
+  - MyoPSTestDataset (MyoPS380TestDataset alias):
+      Input: split_file (test_vol.txt), data_root (Processed_data), dataset="myops380"
       Yields: dict with keys:
         'bSSFP': torch.FloatTensor (1, 128, 128, D)
         'LGE':   torch.FloatTensor (1, 128, 128, D)
         'T2w':   torch.FloatTensor (1, 128, 128, D)
         'label': torch.LongTensor (128, 128, D) with values in {0, 1, 2, 3}
-        'case_id': str ID, e.g. 'case0001'
+        'case_id': str ID, e.g. 'case0001' or 'Case2011'
+        'spacing': torch.FloatTensor (3,) [optional, e.g. (1.0, 1.0, s_z) in mm]
 """
 
 from __future__ import annotations
@@ -34,10 +38,35 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 
-EXPECTED_TRAIN_SLICES = 1972
-EXPECTED_TRAIN_PATIENTS = 304
-EXPECTED_TEST_VOLUMES = 76
+# Dataset Constants
+MYOPS380_EXPECTED_TRAIN_SLICES = 1972
+MYOPS380_EXPECTED_TRAIN_PATIENTS = 304
+MYOPS380_EXPECTED_TEST_VOLUMES = 76
+
+MYOPSPP_EXPECTED_TRAIN_SLICES = 296
+MYOPSPP_EXPECTED_TRAIN_PATIENTS = 64
+MYOPSPP_EXPECTED_TEST_VOLUMES = 16
+
+# Backward compatibility aliases
+EXPECTED_TRAIN_SLICES = MYOPS380_EXPECTED_TRAIN_SLICES
+EXPECTED_TRAIN_PATIENTS = MYOPS380_EXPECTED_TRAIN_PATIENTS
+EXPECTED_TEST_VOLUMES = MYOPS380_EXPECTED_TEST_VOLUMES
+
 CANONICAL_LUT = np.array([0, 1, 3, 2], dtype=np.int64)
+
+
+def normalize_dataset_name(dataset: Optional[str]) -> str:
+    """Normalize dataset identifier string."""
+    if dataset is None:
+        return "myops380"
+    ds = str(dataset).strip().lower()
+    if not ds:
+        return "myops380"
+    if ds in ("myopspp", "myopspp_unet2d_roi128_1mm", "myops_plus_plus", "myops++"):
+        return "myopspp"
+    if ds in ("myops380", "myops_380", "default"):
+        return "myops380"
+    raise ValueError(f"Unknown dataset identifier: '{dataset}', expected 'myops380' or 'myopspp'")
 
 
 def seed_worker(worker_id: int) -> None:
@@ -58,9 +87,12 @@ def resolve_split_file(split_file: Union[str, Path], default_filename: str) -> P
 
 
 def extract_patient_id(case_slice_or_vol: str) -> str:
-    """Extracts normalized patient ID from slice name or volume filename."""
+    """Extracts normalized patient ID from slice name or volume filename (preserving case)."""
     clean = re.sub(r"(\.npy)?\.h5$", "", str(case_slice_or_vol).strip())
     return clean.split("_slice")[0]
+
+
+patient_id = extract_patient_id
 
 
 def read_manifest_lines(file_path: Union[str, Path]) -> List[str]:
@@ -119,11 +151,12 @@ def _to_volume_label_tensor(lbl: Union[np.ndarray, torch.Tensor]) -> torch.Tenso
     return t
 
 
-class MyoPS380TrainDataset(Dataset):
-    """Slice-level training dataset for MyoPS380 benchmark.
-    
+class MyoPSTrainDataset(Dataset):
+    """Slice-level training dataset for MyoPS380 and MyoPS++ benchmarks.
+
     Loads aligned bSSFP, LGE, and T2w 2D image slices along with ground-truth
-    segmentation masks across 1,972 slices from 304 patients specified in train.txt.
+    segmentation masks across slices specified in train.txt.
+    Supports both lowercase case IDs (case0001) and uppercase case IDs (Case2001).
     """
 
     def __init__(
@@ -133,7 +166,9 @@ class MyoPS380TrainDataset(Dataset):
         transform: Optional[Callable] = None,
         validate_files: bool = False,
         strict: bool = False,
+        dataset: str = "myops380",
     ):
+        self.dataset = normalize_dataset_name(dataset)
         self.split_file = resolve_split_file(split_file, "train.txt")
         self.data_root = Path(data_root)
         if not self.data_root.is_dir():
@@ -148,14 +183,21 @@ class MyoPS380TrainDataset(Dataset):
         self.patients = sorted(list({extract_patient_id(s) for s in self.slices}))
 
         if strict:
-            if len(self.slices) != EXPECTED_TRAIN_SLICES:
+            if self.dataset == "myopspp":
+                exp_slices = MYOPSPP_EXPECTED_TRAIN_SLICES
+                exp_patients = MYOPSPP_EXPECTED_TRAIN_PATIENTS
+            else:
+                exp_slices = MYOPS380_EXPECTED_TRAIN_SLICES
+                exp_patients = MYOPS380_EXPECTED_TRAIN_PATIENTS
+
+            if len(self.slices) != exp_slices:
                 raise ValueError(
-                    f"Expected exactly {EXPECTED_TRAIN_SLICES} training slices, "
+                    f"Expected exactly {exp_slices} training slices for {self.dataset}, "
                     f"got {len(self.slices)} in {self.split_file}"
                 )
-            if len(self.patients) != EXPECTED_TRAIN_PATIENTS:
+            if len(self.patients) != exp_patients:
                 raise ValueError(
-                    f"Expected exactly {EXPECTED_TRAIN_PATIENTS} unique training patients, "
+                    f"Expected exactly {exp_patients} unique training patients for {self.dataset}, "
                     f"got {len(self.patients)} in {self.split_file}"
                 )
 
@@ -252,11 +294,16 @@ class MyoPS380TrainDataset(Dataset):
         }
 
 
-class MyoPS380TestDataset(Dataset):
-    """Volume-level test evaluation dataset for MyoPS380 benchmark.
-    
+# Backward compatibility alias
+MyoPS380TrainDataset = MyoPSTrainDataset
+
+
+class MyoPSTestDataset(Dataset):
+    """Volume-level test evaluation dataset for MyoPS380 and MyoPS++ benchmarks.
+
     Loads aligned 3D volumes (128, 128, D) for bSSFP, LGE, and T2w modalities,
-    along with 3D ground truth segmentation masks across the 76 official test cases.
+    along with 3D ground truth segmentation masks and dynamic physical spacing [1.0, 1.0, s_z].
+    Supports both lowercase case IDs (case0001) and uppercase case IDs (Case2011).
     """
 
     def __init__(
@@ -266,7 +313,9 @@ class MyoPS380TestDataset(Dataset):
         canonical_label: bool = False,
         validate_files: bool = False,
         strict: bool = False,
+        dataset: str = "myops380",
     ):
+        self.dataset = normalize_dataset_name(dataset)
         self.split_file = resolve_split_file(split_file, "test_vol.txt")
         self.data_root = Path(data_root)
         if not self.data_root.is_dir():
@@ -279,11 +328,13 @@ class MyoPS380TestDataset(Dataset):
         if not self.cases:
             raise ValueError(f"Test manifest is empty: {self.split_file}")
 
-        if strict and len(self.cases) != EXPECTED_TEST_VOLUMES:
-            raise ValueError(
-                f"Expected exactly {EXPECTED_TEST_VOLUMES} test volumes, "
-                f"got {len(self.cases)} in {self.split_file}"
-            )
+        if strict:
+            exp_vols = MYOPSPP_EXPECTED_TEST_VOLUMES if self.dataset == "myopspp" else MYOPS380_EXPECTED_TEST_VOLUMES
+            if len(self.cases) != exp_vols:
+                raise ValueError(
+                    f"Expected exactly {exp_vols} test volumes for {self.dataset}, "
+                    f"got {len(self.cases)} in {self.split_file}"
+                )
 
         if validate_files:
             self._validate_all_files()
@@ -295,7 +346,9 @@ class MyoPS380TestDataset(Dataset):
             for case_id in self.cases:
                 h5_path = mod_dir / f"{case_id}.npy.h5"
                 if not h5_path.is_file():
-                    missing.append(str(h5_path))
+                    h5_path_alt = mod_dir / f"{case_id}.h5"
+                    if not h5_path_alt.is_file():
+                        missing.append(str(h5_path))
         if missing:
             raise FileNotFoundError(
                 f"Missing {len(missing)} test volume files; first 5: {missing[:5]}"
@@ -304,34 +357,105 @@ class MyoPS380TestDataset(Dataset):
     def __len__(self) -> int:
         return len(self.cases)
 
-    def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
         case_id = self.cases[idx]
 
         bssfp_path = self.data_root / "bSSFP" / "test_vol_h5" / f"{case_id}.npy.h5"
-        lge_path = self.data_root / "LGE" / "test_vol_h5" / f"{case_id}.npy.h5"
-        t2w_path = self.data_root / "T2w" / "test_vol_h5" / f"{case_id}.npy.h5"
+        if not bssfp_path.is_file():
+            bssfp_path = self.data_root / "bSSFP" / "test_vol_h5" / f"{case_id}.h5"
 
+        lge_path = self.data_root / "LGE" / "test_vol_h5" / f"{case_id}.npy.h5"
+        if not lge_path.is_file():
+            lge_path = self.data_root / "LGE" / "test_vol_h5" / f"{case_id}.h5"
+
+        t2w_path = self.data_root / "T2w" / "test_vol_h5" / f"{case_id}.npy.h5"
+        if not t2w_path.is_file():
+            t2w_path = self.data_root / "T2w" / "test_vol_h5" / f"{case_id}.h5"
+
+        spacing = None
         with h5py.File(bssfp_path, "r") as f_bssfp:
             bssfp = f_bssfp["image"][:]
             label = f_bssfp["label"][:]
+            if "spacing" in f_bssfp:
+                spacing = np.asarray(f_bssfp["spacing"][:], dtype=np.float32)
+            elif "spacing" in f_bssfp.attrs:
+                spacing = np.asarray(f_bssfp.attrs["spacing"], dtype=np.float32)
 
         with h5py.File(lge_path, "r") as f_lge:
             lge = f_lge["image"][:]
+            if spacing is None:
+                if "spacing" in f_lge:
+                    spacing = np.asarray(f_lge["spacing"][:], dtype=np.float32)
+                elif "spacing" in f_lge.attrs:
+                    spacing = np.asarray(f_lge.attrs["spacing"], dtype=np.float32)
 
         with h5py.File(t2w_path, "r") as f_t2w:
             t2w = f_t2w["image"][:]
+            if spacing is None:
+                if "spacing" in f_t2w:
+                    spacing = np.asarray(f_t2w["spacing"][:], dtype=np.float32)
+                elif "spacing" in f_t2w.attrs:
+                    spacing = np.asarray(f_t2w.attrs["spacing"], dtype=np.float32)
 
         label_np = np.asarray(label, dtype=np.int64)
-        if self.canonical_label:
+        # Double-swap prevention:
+        # MyoPS380 GT is legacy order: convert to canonical only if requested.
+        # MyoPS++ GT is ALREADY canonical: do NOT apply CANONICAL_LUT!
+        if self.canonical_label and self.dataset == "myops380":
             label_np = CANONICAL_LUT[label_np]
 
-        return {
+        # For MyoPS++, if spacing was not stored in H5, default to [1.0, 1.0, 1.0] mm
+        if spacing is None and self.dataset == "myopspp":
+            spacing = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+
+        result: Dict[str, Any] = {
             "bSSFP": _to_volume_image_tensor(bssfp),
             "LGE": _to_volume_image_tensor(lge),
             "T2w": _to_volume_image_tensor(t2w),
             "label": _to_volume_label_tensor(label_np),
             "case_id": case_id,
         }
+        if spacing is not None:
+            result["spacing"] = torch.from_numpy(spacing.astype(np.float32))
+
+        return result
+
+
+# Backward compatibility alias
+MyoPS380TestDataset = MyoPSTestDataset
+
+
+def create_myops_train_loader(
+    split_file: Union[str, Path],
+    data_root: Union[str, Path],
+    dataset: str = "myops380",
+    batch_size: int = 16,
+    shuffle: bool = True,
+    num_workers: int = 4,
+    pin_memory: bool = True,
+    transform: Optional[Callable] = None,
+    strict: bool = False,
+    generator: Optional[torch.Generator] = None,
+) -> DataLoader:
+    """Factory helper to construct standardized train DataLoader for MyoPS380 or MyoPS++."""
+    ds = MyoPSTrainDataset(
+        split_file=split_file,
+        data_root=data_root,
+        transform=transform,
+        strict=strict,
+        dataset=dataset,
+    )
+    return DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False,
+        generator=generator,
+        worker_init_fn=seed_worker,
+        persistent_workers=False,
+    )
 
 
 def create_myops380_train_loader(
@@ -345,23 +469,42 @@ def create_myops380_train_loader(
     strict: bool = False,
     generator: Optional[torch.Generator] = None,
 ) -> DataLoader:
-    """Factory helper to construct standardized MyoPS380 train DataLoader."""
-    dataset = MyoPS380TrainDataset(
+    """Factory helper for MyoPS380 train DataLoader (100% backward compatible)."""
+    return create_myops_train_loader(
         split_file=split_file,
         data_root=data_root,
-        transform=transform,
-        strict=strict,
-    )
-    return DataLoader(
-        dataset,
+        dataset="myops380",
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        drop_last=False,
+        transform=transform,
+        strict=strict,
         generator=generator,
-        worker_init_fn=seed_worker,
-        persistent_workers=False,
+    )
+
+
+def create_myops_test_loader(
+    split_file: Union[str, Path],
+    data_root: Union[str, Path],
+    dataset: str = "myops380",
+    canonical_label: bool = False,
+    num_workers: int = 0,
+    strict: bool = False,
+) -> DataLoader:
+    """Factory helper to construct standardized test DataLoader for MyoPS380 or MyoPS++."""
+    ds = MyoPSTestDataset(
+        split_file=split_file,
+        data_root=data_root,
+        canonical_label=canonical_label,
+        strict=strict,
+        dataset=dataset,
+    )
+    return DataLoader(
+        ds,
+        batch_size=1,
+        shuffle=False,
+        num_workers=num_workers,
     )
 
 
@@ -372,16 +515,12 @@ def create_myops380_test_loader(
     num_workers: int = 0,
     strict: bool = False,
 ) -> DataLoader:
-    """Factory helper to construct standardized MyoPS380 test DataLoader."""
-    dataset = MyoPS380TestDataset(
+    """Factory helper for MyoPS380 test DataLoader (100% backward compatible)."""
+    return create_myops_test_loader(
         split_file=split_file,
         data_root=data_root,
+        dataset="myops380",
         canonical_label=canonical_label,
-        strict=strict,
-    )
-    return DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=False,
         num_workers=num_workers,
+        strict=strict,
     )

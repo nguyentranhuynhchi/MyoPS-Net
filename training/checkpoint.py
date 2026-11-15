@@ -165,9 +165,17 @@ def validate_checkpoint_payload(payload: Dict[str, Any], require_complete: bool 
         raise ValueError(f"Checkpoint payload missing mandatory keys: {missing}")
 
     # Check protocol identifiers
-    if payload["protocol_id"] != "myops380_train304_test76_last_v1":
+    valid_protocols = {
+        "myops380_train304_test76_last_v1",
+        "myopspp_train64_test16_last_v1",
+        "myopspp_unet2d_roi128_1mm_train64_test16_last_v1",
+        "myopspp_bc80_train64_test16_last_v1",
+    }
+    if payload["protocol_id"] not in valid_protocols:
         raise ValueError(f"Invalid protocol_id: {payload['protocol_id']}")
-    if payload["opt_protocol"] != "im_mseg_adamw_poly_v1":
+    opt_proto = payload["opt_protocol"]
+    opt_id = opt_proto.get("id") if isinstance(opt_proto, dict) else str(opt_proto)
+    if opt_id != "im_mseg_adamw_poly_v1":
         raise ValueError(f"Invalid opt_protocol: {payload['opt_protocol']}")
 
     # Check budget and counter consistency
@@ -269,7 +277,11 @@ def save_checkpoint(
             payload["rng"] = payload["rng_state"]
 
         if "protocol_id" not in payload:
-            payload["protocol_id"] = "myops380_train304_test76_last_v1"
+            ds = str(payload.get("dataset", "myops380")).lower()
+            if ds in ("myopspp", "myopspp_unet2d_roi128_1mm"):
+                payload["protocol_id"] = "myopspp_train64_test16_last_v1"
+            else:
+                payload["protocol_id"] = "myops380_train304_test76_last_v1"
         if "opt_protocol" not in payload:
             payload["opt_protocol"] = "im_mseg_adamw_poly_v1"
         if "optimization_protocol" not in payload:
@@ -312,8 +324,16 @@ def save_checkpoint(
     scheduler_state = scheduler.state_dict()
     scaler_state = scaler.state_dict()
 
+    protocol_id = extra.pop("protocol_id", None)
+    if protocol_id is None:
+        ds = extra.get("dataset", (args_dict.get("dataset", "myops380") if args_dict else "myops380"))
+        if str(ds).lower() in ("myopspp", "myopspp_unet2d_roi128_1mm"):
+            protocol_id = "myopspp_train64_test16_last_v1"
+        else:
+            protocol_id = "myops380_train304_test76_last_v1"
+
     payload = {
-        "protocol_id": "myops380_train304_test76_last_v1",
+        "protocol_id": protocol_id,
         "opt_protocol": "im_mseg_adamw_poly_v1",
         "optimization_protocol": OPTIMIZATION_PROTOCOL,
         "format_version": 1,

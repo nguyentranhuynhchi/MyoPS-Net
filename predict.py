@@ -39,7 +39,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from dataset.myops380_dataset import (
     EXPECTED_TEST_VOLUMES,
+    MYOPSPP_EXPECTED_TEST_VOLUMES,
     MyoPS380TestDataset,
+    MyoPSTestDataset,
+    normalize_dataset_name,
     read_manifest_lines,
     resolve_split_file,
 )
@@ -204,6 +207,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="Deterministic Single-Pass Volume Inference for MyoPS-Net Baseline",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    # Dataset selection
+    parser.add_argument(
+        "--dataset",
+        default="myops380",
+        choices=["myops380", "myopspp", "myopspp_unet2d_roi128_1mm"],
+        help="Dataset choice: myops380 or myopspp",
+    )
     # Checkpoint & directories
     parser.add_argument("--checkpoint", default=None, help="Path to checkpoint .pt file (defaults to <run_dir>/checkpoints/myopsnet_seed<seed>.pt)")
     parser.add_argument("--run_dir", default=None, help="Root directory of training run (defaults to runs/myopsnet_seed<seed>)")
@@ -216,8 +226,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Data paths
-    parser.add_argument("--data_root", "--data-root", default="D:/NCKH/Dataset/MyoPS380/Processed_data", help="Dataset root containing bSSFP, LGE, T2w test_vol_h5")
-    parser.add_argument("--split_dir", "--list_dir", default="D:/NCKH/SCAR/preprocessing/splits/myops380_no_val", help="Directory containing test_vol.txt")
+    parser.add_argument("--data_root", "--data-root", default=None, help="Dataset root containing bSSFP, LGE, T2w test_vol_h5")
+    parser.add_argument("--split_dir", "--list_dir", default=None, help="Directory containing test_vol.txt")
     parser.add_argument("--split", default="test_vol", help="Split name to evaluate (default: test_vol)")
     parser.add_argument("--test_manifest", default=None, help="Direct path to test manifest file (overrides --split_dir/--split.txt)")
 
@@ -229,7 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Options & validation
     parser.add_argument("--require_complete", action=argparse.BooleanOptionalAction, default=False, help="Require checkpoint to have completed all 300 epochs")
-    parser.add_argument("--strict", action=argparse.BooleanOptionalAction, default=False, help="Strictly enforce exactly 76 test volumes in manifest")
+    parser.add_argument("--strict", action=argparse.BooleanOptionalAction, default=False, help="Strictly enforce expected test volume count")
     parser.add_argument("--save_nii", action=argparse.BooleanOptionalAction, default=False, help="Also export NIfTI (.nii.gz) format alongside .npz")
     parser.add_argument("--dry_run", "--smoke_test", action="store_true", help="Run fast test inference on first 2 cases only")
     parser.add_argument("--cases", nargs="+", default=None, help="Explicit list of CaseIDs to predict (e.g. --cases case0001 case0006)")
@@ -237,8 +247,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def resolve_paths(args: argparse.Namespace) -> Tuple[Path, Path, Path, Path]:
-    """Resolves checkpoint path, run directory, predictions output directory, and manifest path."""
+def resolve_paths(args: argparse.Namespace) -> Tuple[Path, Path, Path, Path, Path]:
+    """Resolves checkpoint path, run directory, predictions output directory, manifest path, and data root."""
     if args.run_dir is not None:
         run_dir = Path(args.run_dir).resolve()
     elif args.checkpoint is not None:
@@ -260,32 +270,66 @@ def resolve_paths(args: argparse.Namespace) -> Tuple[Path, Path, Path, Path]:
     else:
         pred_dir = run_dir / "test_predictions"
 
+    dataset = normalize_dataset_name(getattr(args, "dataset", "myops380"))
+
     if args.test_manifest is not None:
         manifest_path = Path(args.test_manifest).resolve()
     else:
-        split_p = Path(args.split_dir).resolve()
+        if args.split_dir is not None:
+            split_p = Path(args.split_dir).resolve()
+        else:
+            if dataset == "myopspp":
+                candidates = [
+                    PROJECT_ROOT / "lists" / "lists_MyoPSpp",
+                    PROJECT_ROOT / "preprocessing" / "splits" / "myopspp_bc80_no_val",
+                    Path("D:/NCKH/SCAR/preprocessing/splits/myopspp_bc80_no_val"),
+                ]
+            else:
+                candidates = [
+                    PROJECT_ROOT / "preprocessing" / "splits" / "myops380_no_val",
+                    Path("D:/NCKH/SCAR/preprocessing/splits/myops380_no_val"),
+                ]
+            split_p = next((c for c in candidates if c.is_dir()), candidates[0])
+
         if split_p.is_file():
             manifest_path = split_p
         else:
             manifest_path = split_p / f"{args.split}.txt"
 
-    return checkpoint_path, run_dir, pred_dir, manifest_path
+    if args.data_root is not None:
+        data_root = Path(args.data_root).resolve()
+    else:
+        if dataset == "myopspp":
+            data_root = Path(os.environ.get("MYOPSPP_DATA_ROOT", "D:/NCKH/Dataset/MyoPSpp_UNet2D_ROI128_1mm")).resolve()
+        else:
+            data_root = Path(os.environ.get("MYOPS380_DATA_ROOT", "D:/NCKH/Dataset/MyoPS380/Processed_data")).resolve()
+
+    return checkpoint_path, run_dir, pred_dir, manifest_path, data_root
 
 
 def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
-    """Executes standardized volume inference pipeline on MyoPS380 test cases."""
+    """Executes standardized volume inference pipeline on MyoPS test cases."""
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    checkpoint_path, run_dir, pred_dir, manifest_path = resolve_paths(args)
+    dataset = normalize_dataset_name(args.dataset)
+    if dataset == "myopspp":
+        training_protocol_id = "myopspp_train64_test16_last_v1"
+        benchmark_protocol_id = "myopspp_unet2d_roi128_1mm_predicted_roi_mm_v1"
+    else:
+        training_protocol_id = TRAINING_PROTOCOL_ID
+        benchmark_protocol_id = BENCHMARK_PROTOCOL_ID
+
+    checkpoint_path, run_dir, pred_dir, manifest_path, data_root = resolve_paths(args)
     pred_dir.mkdir(parents=True, exist_ok=True)
     logger = setup_inference_logger(pred_dir / "predict.log")
 
     logger.info("=" * 75)
     logger.info("MyoPS-Net Standardized Volume Inference Pipeline")
-    logger.info("Protocol: %s | Benchmark: %s", TRAINING_PROTOCOL_ID, BENCHMARK_PROTOCOL_ID)
+    logger.info("Dataset: %s | Protocol: %s | Benchmark: %s", dataset, training_protocol_id, benchmark_protocol_id)
     logger.info("Checkpoint: %s", checkpoint_path)
     logger.info("Manifest: %s", manifest_path)
+    logger.info("Data Root: %s", data_root)
     logger.info("Prediction Output Dir: %s", pred_dir)
     logger.info("=" * 75)
 
@@ -318,13 +362,14 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     model.eval()
 
     # 3. Load Test Dataset
-    dataset = MyoPS380TestDataset(
+    test_dataset = MyoPSTestDataset(
         split_file=manifest_path,
-        data_root=args.data_root,
+        data_root=data_root,
         canonical_label=False,
         strict=args.strict,
+        dataset=dataset,
     )
-    all_cases = dataset.cases
+    all_cases = test_dataset.cases
     logger.info("Found %d test volumes in manifest", len(all_cases))
 
     # Handle case filtering (--cases or --dry_run)
@@ -345,7 +390,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     start_total_time = time.perf_counter()
 
     for idx, case_idx in enumerate(selected_indices):
-        sample = dataset[case_idx]
+        sample = test_dataset[case_idx]
         case_id = sample["case_id"]
 
         # Extract 3D volumes (H, W, D)
@@ -388,8 +433,10 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
             case_id=case_id,
             class_names=np.asarray(CLASS_NAMES),
             shape=np.asarray(prediction.shape),
-            protocol_id=TRAINING_PROTOCOL_ID,
-            benchmark_protocol=BENCHMARK_PROTOCOL_ID,
+            protocol_id=training_protocol_id,
+            benchmark_protocol=benchmark_protocol_id,
+            dataset=dataset,
+            spacing=np.asarray(sample.get("spacing", [1.0, 1.0, 1.0])),
         )
 
         # Optional NIfTI export
@@ -430,8 +477,9 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
 
     # 5. Export Execution Summary Metadata
     summary_record = {
-        "training_protocol_id": TRAINING_PROTOCOL_ID,
-        "benchmark_protocol_id": BENCHMARK_PROTOCOL_ID,
+        "dataset": dataset,
+        "training_protocol_id": training_protocol_id,
+        "benchmark_protocol_id": benchmark_protocol_id,
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_epoch": completed_epochs,
         "planned_epochs": planned_epochs,
