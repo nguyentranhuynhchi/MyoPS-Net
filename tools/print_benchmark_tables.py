@@ -43,29 +43,33 @@ def print_tables(run_dir: Path) -> None:
         print("-" * 80)
 
         regions = [
+            ("Myocardium (Whole Ring)", "myocardial_ring"),
             ("Scar (LGE)", "scar"),
-            ("Edema (T2)", "edema"),
-            ("Myocardium (MYO)", "myocardial_ring"),
-            ("LGE-abnormal", "edema_inclusive"),
-            ("Normal Myo", "normal_myocardium"),
+            ("Edema (Exclusive)", "edema"),
+            ("Avg Pathology (Scar + Edema-Excl)", "avg_pathology_dice_pseudo"),
+            ("--- Phụ trợ / Tham khảo ---", None),
+            ("Edema-inclusive (LGE-abnormal)", "edema_inclusive"),
+            ("Normal Myocardium", "normal_myocardium"),
         ]
 
         hd_key = f"mean_hd95_{dist_unit}"
         for name, key in regions:
+            if key is None:
+                print("-" * 80)
+                continue
+            if key == "avg_pathology_dice_pseudo":
+                avg_exc = m_data.get("avg_pathology_dice")
+                dsc_str = f"{avg_exc*100:.2f}%" if avg_exc is not None else "N/A"
+                print(f"{name:<35} | {dsc_str:<15} | {'-':<15}")
+                continue
+
             st = m_data.get(key, {})
             dsc = st.get("mean_dice")
             hd = st.get(hd_key)
             dsc_str = f"{dsc*100:.2f}%" if dsc is not None else "N/A"
             hd_str = f"{hd:.2f} {dist_unit}" if hd is not None else "N/A"
-            print(f"{name:<25} | {dsc_str:<15} | {hd_str:<15}")
+            print(f"{name:<35} | {dsc_str:<15} | {hd_str:<15}")
 
-        print("-" * 80)
-        avg_inc = m_data.get("avg_pathology_inclusive_dice")
-        if avg_inc is not None:
-            print(f"Avg Pathology (Inc + Scar) Dice : {avg_inc*100:.2f}%")
-        avg_exc = m_data.get("avg_pathology_dice")
-        if avg_exc is not None:
-            print(f"Avg Pathology (Edema + Scar) Dice: {avg_exc*100:.2f}%")
         print("=" * 80 + "\n")
     else:
         print(f"[!] Warning: Metrics evaluation file not found: {metric_file}")
