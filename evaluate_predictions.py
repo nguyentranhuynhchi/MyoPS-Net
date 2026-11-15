@@ -661,7 +661,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to Processed_data root directory",
     )
     parser.add_argument(
-        "--split_dir", "--split-dir", "--split_file", "--split-file",
+        "--split_dir", "--split-dir", "--split_file", "--split-file", "--list_dir", "--list-dir",
         default=None,
         dest="split_path",
         help="Path to test_vol.txt or directory containing test_vol.txt",
