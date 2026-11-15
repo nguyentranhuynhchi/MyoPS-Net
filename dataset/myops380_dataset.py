@@ -339,16 +339,27 @@ class MyoPSTestDataset(Dataset):
         if validate_files:
             self._validate_all_files()
 
+    def _resolve_vol_path(self, modality: str, case_id: str) -> Path:
+        candidates = [
+            self.data_root / modality / "test_vol_h5" / f"{case_id}.npy.h5",
+            self.data_root / modality / "test_vol_h5" / f"{case_id}.h5",
+            self.data_root / "test_vol_h5" / f"{case_id}.npy.h5",
+            self.data_root / "test_vol_h5" / f"{case_id}.h5",
+            self.data_root / f"{case_id}.npy.h5",
+            self.data_root / f"{case_id}.h5",
+        ]
+        for p in candidates:
+            if p.is_file():
+                return p
+        return candidates[0]
+
     def _validate_all_files(self) -> None:
         missing = []
         for modality in ("bSSFP", "LGE", "T2w"):
-            mod_dir = self.data_root / modality / "test_vol_h5"
             for case_id in self.cases:
-                h5_path = mod_dir / f"{case_id}.npy.h5"
+                h5_path = self._resolve_vol_path(modality, case_id)
                 if not h5_path.is_file():
-                    h5_path_alt = mod_dir / f"{case_id}.h5"
-                    if not h5_path_alt.is_file():
-                        missing.append(str(h5_path))
+                    missing.append(str(h5_path))
         if missing:
             raise FileNotFoundError(
                 f"Missing {len(missing)} test volume files; first 5: {missing[:5]}"
@@ -360,22 +371,18 @@ class MyoPSTestDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         case_id = self.cases[idx]
 
-        bssfp_path = self.data_root / "bSSFP" / "test_vol_h5" / f"{case_id}.npy.h5"
-        if not bssfp_path.is_file():
-            bssfp_path = self.data_root / "bSSFP" / "test_vol_h5" / f"{case_id}.h5"
-
-        lge_path = self.data_root / "LGE" / "test_vol_h5" / f"{case_id}.npy.h5"
-        if not lge_path.is_file():
-            lge_path = self.data_root / "LGE" / "test_vol_h5" / f"{case_id}.h5"
-
-        t2w_path = self.data_root / "T2w" / "test_vol_h5" / f"{case_id}.npy.h5"
-        if not t2w_path.is_file():
-            t2w_path = self.data_root / "T2w" / "test_vol_h5" / f"{case_id}.h5"
+        bssfp_path = self._resolve_vol_path("bSSFP", case_id)
+        lge_path = self._resolve_vol_path("LGE", case_id)
+        t2w_path = self._resolve_vol_path("T2w", case_id)
 
         spacing = None
+        label = None
         with h5py.File(bssfp_path, "r") as f_bssfp:
             bssfp = f_bssfp["image"][:]
-            label = f_bssfp["label"][:]
+            for k in ("label", "gt", "segmentation"):
+                if k in f_bssfp:
+                    label = f_bssfp[k][:]
+                    break
             if "spacing" in f_bssfp:
                 spacing = np.asarray(f_bssfp["spacing"][:], dtype=np.float32)
             elif "spacing" in f_bssfp.attrs:
@@ -383,6 +390,11 @@ class MyoPSTestDataset(Dataset):
 
         with h5py.File(lge_path, "r") as f_lge:
             lge = f_lge["image"][:]
+            if label is None:
+                for k in ("label", "gt", "segmentation"):
+                    if k in f_lge:
+                        label = f_lge[k][:]
+                        break
             if spacing is None:
                 if "spacing" in f_lge:
                     spacing = np.asarray(f_lge["spacing"][:], dtype=np.float32)
@@ -391,11 +403,19 @@ class MyoPSTestDataset(Dataset):
 
         with h5py.File(t2w_path, "r") as f_t2w:
             t2w = f_t2w["image"][:]
+            if label is None:
+                for k in ("label", "gt", "segmentation"):
+                    if k in f_t2w:
+                        label = f_t2w[k][:]
+                        break
             if spacing is None:
                 if "spacing" in f_t2w:
                     spacing = np.asarray(f_t2w["spacing"][:], dtype=np.float32)
                 elif "spacing" in f_t2w.attrs:
                     spacing = np.asarray(f_t2w.attrs["spacing"], dtype=np.float32)
+
+        if label is None:
+            raise KeyError(f"No ground truth label found for {case_id} in {bssfp_path}")
 
         label_np = np.asarray(label, dtype=np.int64)
         # Double-swap prevention:

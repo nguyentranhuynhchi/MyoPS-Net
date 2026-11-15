@@ -425,6 +425,12 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
         if not set(unique_vals).issubset({0, 1, 2, 3}):
             raise ValueError(f"{case_id}: unexpected label values {unique_vals}, must be in [0..3]")
 
+        # Extract spacing
+        sp = sample.get("spacing", [1.0, 1.0, 1.0])
+        if isinstance(sp, torch.Tensor):
+            sp = sp.detach().cpu().numpy()
+        spacing_arr = np.asarray(sp, dtype=np.float32)
+
         # Save canonical .npz file
         npz_out = pred_dir / f"{case_id}_pred.npz"
         np.savez_compressed(
@@ -436,7 +442,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
             protocol_id=training_protocol_id,
             benchmark_protocol=benchmark_protocol_id,
             dataset=dataset,
-            spacing=np.asarray(sample.get("spacing", [1.0, 1.0, 1.0])),
+            spacing=spacing_arr,
         )
 
         # Optional NIfTI export
@@ -492,6 +498,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
         "amp_dtype": str(amp_dtype),
         "batch_size": args.batch_size,
         "total_volumes": len(selected_indices),
+        "cases_predicted": len(selected_indices),
         "total_slices": total_slices,
         "total_duration_seconds": round(total_duration, 4),
         "slices_per_second": round(throughput, 2),
@@ -499,6 +506,10 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     }
     with open(pred_dir / "inference_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary_record, f, indent=2)
+
+    for h in list(logger.handlers):
+        h.close()
+        logger.removeHandler(h)
 
     return summary_record
 

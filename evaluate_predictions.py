@@ -374,6 +374,11 @@ def compute_cohort_summary(
         summary["avg_pathology_inclusive_hd95_mm"] = summary.get(f"avg_pathology_inclusive_hd95_{distance_unit}")
         summary["avg_pathology_asd_mm"] = summary.get(f"avg_pathology_asd_{distance_unit}")
         summary["avg_pathology_inclusive_asd_mm"] = summary.get(f"avg_pathology_inclusive_asd_{distance_unit}")
+        # Backward compatibility aliases for table extraction parsers
+        if summary.get("avg_pathology_hd95_voxel") is None:
+            summary["avg_pathology_hd95_voxel"] = summary["avg_pathology_hd95_mm"]
+        if summary.get("avg_pathology_inclusive_hd95_voxel") is None:
+            summary["avg_pathology_inclusive_hd95_voxel"] = summary["avg_pathology_inclusive_hd95_mm"]
 
     # Summary rows for wide CSV (Mean, Std, Median)
     summary_rows = []
@@ -617,6 +622,10 @@ def evaluate_dataset(
             distance_unit,
         )
     logger.info("================================================================")
+
+    for h in list(logger.handlers):
+        h.close()
+        logger.removeHandler(h)
 
     return summary
 

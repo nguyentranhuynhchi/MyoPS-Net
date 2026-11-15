@@ -174,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--measure_efficiency", action="store_true", help="Measure and export 7 computational efficiency metrics")
     parser.add_argument("--efficiency_output", default=None, help="Output path for efficiency_metrics.json")
     parser.add_argument("--efficiency_only", action="store_true", help="Only measure complexity and inference, without full training")
+    parser.add_argument("--simulate_training", action="store_true", help="Simulate 1 epoch training to benchmark throughput and Peak VRAM without full 300 epochs")
 
     # Checkpoint & logging
     parser.add_argument("--resume", default=None, help="Path to checkpoint file or 'auto'")
@@ -250,7 +251,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     else:
         run_dir = Path(args.run_dir)
     run_dir = run_dir.resolve()
-    if not resuming and run_dir.exists() and any(run_dir.iterdir()):
+    if not resuming and not (args.efficiency_only or args.simulate_training) and run_dir.exists() and any(run_dir.iterdir()):
         raise FileExistsError("Run directory is not empty; choose a new --run_dir or use --resume")
 
     ckpt_dir = run_dir / "checkpoints"
@@ -278,6 +279,125 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     logger.info("Device: %s | AMP: %s (%s)", device, amp_mode, amp_dtype)
     logger.info("Seed: %d | Batch size: %d | Planned epochs: %d", args.seed, args.batch_size, args.epochs)
     logger.info("=" * 70)
+
+    # 2b. Standalone Computational Efficiency Benchmarking (no training data required)
+    if args.efficiency_only or args.simulate_training:
+        model = MyoPSNetL().to(device)
+        model.apply(weights_init)
+        logger.info("Running complexity and inference efficiency measurements ...")
+        eff_params_info = count_parameters(model)
+        eff_flops_info = measure_flops(model, input_shape=(1, 3, 128, 128), device=device)
+        inf_warmup = 100 if device.type == "cuda" else 2
+        inf_repeats = 300 if device.type == "cuda" else 5
+        eff_inf_info = measure_inference_efficiency(
+            model, input_shape=(1, 3, 128, 128), device=device, warmup=inf_warmup, repeats=inf_repeats
+        )
+        eff_rule_ok, eff_warnings, eff_hw_info = check_rule_compliance(
+            device=device,
+            amp_mode=amp_mode,
+            num_workers=args.num_workers,
+            pin_memory=pin_memory,
+            batch_size=args.batch_size,
+            planned_epochs=args.epochs,
+        )
+
+        training_info = None
+        if args.simulate_training:
+            logger.info("Simulating 1 full training epoch for computational efficiency throughput ...")
+            batches_per_epoch = 19 if dataset == "myopspp" else 124
+            slices_count = 296 if dataset == "myopspp" else 1972
+
+            if device.type == "cuda" and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats(device)
+
+            model.train()
+            sim_criterion = MyoPSLoss().to(device)
+            sim_optimizer = torch.optim.AdamW(model.parameters(), lr=args.base_lr, weight_decay=args.weight_decay)
+
+            # Warmup iteration
+            dummy_c0 = torch.randn(args.batch_size, 1, 128, 128, device=device)
+            dummy_lge = torch.randn(args.batch_size, 1, 128, 128, device=device)
+            dummy_t2 = torch.randn(args.batch_size, 1, 128, 128, device=device)
+            dummy_t_c0 = torch.randint(0, 2, (args.batch_size, 128, 128), device=device)
+            dummy_t_lge = torch.randint(0, 3, (args.batch_size, 128, 128), device=device)
+            dummy_t_t2 = torch.randint(0, 3, (args.batch_size, 128, 128), device=device)
+
+            sim_optimizer.zero_grad()
+            s_c0, s_lge, s_t2 = model(dummy_c0, dummy_lge, dummy_t2)
+            loss, _, _, _ = sim_criterion(s_c0, s_lge, s_t2, dummy_t_c0, dummy_t_lge, dummy_t_t2)
+            loss.backward()
+            sim_optimizer.step()
+            sync_if_cuda(device)
+
+            t_epoch_start = time.perf_counter()
+            for b_idx in range(batches_per_epoch):
+                bs = args.batch_size if (b_idx < batches_per_epoch - 1) else (slices_count % args.batch_size or args.batch_size)
+                if bs != dummy_c0.shape[0]:
+                    b_c0 = dummy_c0[:bs]
+                    b_lge = dummy_lge[:bs]
+                    b_t2 = dummy_t2[:bs]
+                    b_t_c0 = dummy_t_c0[:bs]
+                    b_t_lge = dummy_t_lge[:bs]
+                    b_t_t2 = dummy_t_t2[:bs]
+                else:
+                    b_c0, b_lge, b_t2 = dummy_c0, dummy_lge, dummy_t2
+                    b_t_c0, b_t_lge, b_t_t2 = dummy_t_c0, dummy_t_lge, dummy_t_t2
+
+                sim_optimizer.zero_grad()
+                s_c0, s_lge, s_t2 = model(b_c0, b_lge, b_t2)
+                loss, _, _, _ = sim_criterion(s_c0, s_lge, s_t2, b_t_c0, b_t_lge, b_t_t2)
+                loss.backward()
+                sim_optimizer.step()
+
+            sync_if_cuda(device)
+            t_epoch_end = time.perf_counter()
+            single_epoch_time = t_epoch_end - t_epoch_start
+            peak_train_bytes = int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
+            peak_reserved_bytes = int(torch.cuda.max_memory_reserved(device)) if device.type == "cuda" else 0
+
+            epoch_times = [round(single_epoch_time, 4)] * args.epochs
+            training_info = summarize_training_efficiency(
+                epoch_times_s=epoch_times,
+                total_wall_clock_s=single_epoch_time * args.epochs,
+                peak_vram_bytes=peak_train_bytes,
+                planned_epochs=args.epochs,
+                warmup_epochs=5,
+                peak_reserved_bytes=peak_reserved_bytes,
+            )
+
+        payload = build_efficiency_payload(
+            model_name="MyoPS-Net",
+            model_id="myopsnet",
+            seed=args.seed,
+            dataset=dataset,
+            params_info=eff_params_info,
+            flops_info=eff_flops_info,
+            inference_info=eff_inf_info,
+            training_info=training_info,
+            rule_compliant=eff_rule_ok,
+            compliance_warnings=eff_warnings,
+            hardware_info=eff_hw_info,
+        )
+        eff_paths = [log_dir / "efficiency_metrics.json", run_dir / "efficiency_metrics.json"]
+        if args.efficiency_output:
+            eff_paths.append(Path(args.efficiency_output).resolve())
+        std_out = PROJECT_ROOT / "outputs" / "runs" / "myopsnet" / "efficiency_metrics.json"
+        if std_out not in eff_paths:
+            eff_paths.append(std_out)
+        root_out = PROJECT_ROOT / "efficiency_metrics.json"
+        if root_out not in eff_paths:
+            eff_paths.append(root_out)
+        root_out = PROJECT_ROOT / "efficiency_metrics.json"
+        if root_out not in eff_paths:
+            eff_paths.append(root_out)
+        save_efficiency_report(
+            payload,
+            eff_paths,
+            summary_text_paths=[log_dir / "efficiency_summary.txt", run_dir / "efficiency_summary.txt"],
+            log=logger,
+        )
+        return {"training_complete": False, "efficiency_metrics": payload}
 
     # 3. DataLoader creation
     split_file = split_dir / "train.txt"
@@ -315,7 +435,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     scheduler = build_scheduler(optimizer, total_updates=total_updates)
     scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and amp_dtype == torch.float16))
 
-    # Efficiency benchmarking initialization (if requested)
+    # Efficiency benchmarking initialization (for real training)
     eff_params_info = None
     eff_flops_info = None
     eff_inf_info = None
@@ -324,7 +444,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     eff_hw_info: dict[str, Any] = {}
     epoch_times_measured: list[float] = []
 
-    if args.measure_efficiency or args.efficiency_only:
+    if args.measure_efficiency:
         logger.info("Running complexity and inference efficiency measurements ...")
         eff_params_info = count_parameters(model)
         eff_flops_info = measure_flops(model, input_shape=(1, 3, 128, 128), device=device)
@@ -341,28 +461,6 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
             batch_size=args.batch_size,
             planned_epochs=args.epochs,
         )
-        if args.efficiency_only:
-            payload = build_efficiency_payload(
-                model_name="MyoPS-Net",
-                model_id="myopsnet",
-                seed=args.seed,
-                dataset=dataset,
-                params_info=eff_params_info,
-                flops_info=eff_flops_info,
-                inference_info=eff_inf_info,
-                training_info=None,
-                rule_compliant=eff_rule_ok,
-                compliance_warnings=eff_warnings,
-                hardware_info=eff_hw_info,
-            )
-            eff_paths = [log_dir / "efficiency_metrics.json", run_dir / "efficiency_metrics.json"]
-            if args.efficiency_output:
-                eff_paths.append(Path(args.efficiency_output).resolve())
-            std_out = PROJECT_ROOT / "outputs" / "runs" / "myopsnet" / "efficiency_metrics.json"
-            if std_out not in eff_paths:
-                eff_paths.append(std_out)
-            save_efficiency_report(payload, eff_paths, summary_text_paths=[log_dir / "efficiency_summary.txt"], log=logger)
-            return {"training_complete": False, "efficiency_metrics": payload}
 
     # 5. Handle Resumption
     start_epoch = 0
@@ -637,6 +735,9 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
         std_out = PROJECT_ROOT / "outputs" / "runs" / "myopsnet" / "efficiency_metrics.json"
         if std_out not in eff_paths:
             eff_paths.append(std_out)
+        root_out = PROJECT_ROOT / "efficiency_metrics.json"
+        if root_out not in eff_paths:
+            eff_paths.append(root_out)
         save_efficiency_report(
             eff_payload,
             eff_paths,

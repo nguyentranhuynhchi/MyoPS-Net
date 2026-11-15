@@ -66,6 +66,8 @@ from utils.efficiency import (
     check_rule_compliance,
     count_parameters,
     measure_flops,
+    measure_inference_efficiency,
+    summarize_training_efficiency,
 )
 from utils.tools import (
     create_multi_head_targets,
@@ -521,6 +523,73 @@ class TestCheckpointValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             bad_payload = dict(payload, training_complete=False)
             validate_checkpoint_payload(bad_payload, require_complete=True)
+
+    def test_efficiency_metrics_schema_fields(self):
+        """Ensure latency_ms and epoch_times_1_to_5 exist in efficiency payload."""
+        import train
+        model = MyoPSNetL()
+        inf_info = measure_inference_efficiency(model, input_shape=(1, 3, 128, 128), warmup=1, repeats=2)
+        self.assertIn("latency_ms", inf_info)
+        self.assertIn("latency_ms_per_slice", inf_info)
+        self.assertEqual(inf_info["latency_ms"], inf_info["latency_ms_per_slice"])
+
+        trn_info = summarize_training_efficiency(
+            epoch_times_s=[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+            total_wall_clock_s=91.0,
+            peak_vram_bytes=1024 * 1024 * 100,
+            planned_epochs=7,
+            warmup_epochs=5,
+        )
+        self.assertIn("epoch_times_1_to_5", trn_info)
+        self.assertEqual(len(trn_info["epoch_times_1_to_5"]), 5)
+        self.assertEqual(trn_info["epoch_times_1_to_5"], [10.0, 11.0, 12.0, 13.0, 14.0])
+
+    def test_evaluate_predictions_composite_fallbacks(self):
+        """Ensure mm distance summary produces fallback voxel keys for legacy parsers."""
+        detailed_rows = [
+            {"case": "CaseTest", "region": r, "dice": 0.9, "iou": 0.8, "hd95": 2.5, "asd": 0.5,
+             "status": "ok", "precision": 0.9, "recall": 0.9, "hd95_unit": "mm", "hd95_mm": 2.5, "asd_mm": 0.5}
+            for r in ("scar", "edema", "edema_inclusive", "myocardial_ring", "normal_myocardium")
+        ]
+        case_summaries = [{
+            "case_id": "CaseTest", "scar_dice": 0.9, "edema_dice": 0.9, "edema_inclusive_dice": 0.9,
+            "myocardial_ring_dice": 0.9, "normal_myocardium_dice": 0.9, "avg_pathology_dice": 0.9,
+            "avg_pathology_inclusive_dice": 0.9,
+        }]
+        summary, _ = compute_cohort_summary(
+            detailed_rows=detailed_rows,
+            case_summaries=case_summaries,
+            distance_unit="mm",
+            protocol=BENCHMARK_PROTOCOLS["myopspp"],
+        )
+        self.assertIn("avg_pathology_inclusive_hd95_mm", summary)
+        self.assertIn("avg_pathology_inclusive_hd95_voxel", summary)
+        self.assertEqual(summary["avg_pathology_inclusive_hd95_voxel"], summary["avg_pathology_inclusive_hd95_mm"])
+
+    def test_myops_test_dataset_synthetic_h5_loading(self):
+        """Test MyoPSTestDataset against synthetic H5 files with both spacing and labels."""
+        import h5py
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            split_file = tmp_path / "test_vol.txt"
+            split_file.write_text("Case2001\n", encoding="utf-8")
+
+            # Create test_vol_h5 layout
+            for mod in ("bSSFP", "LGE", "T2w"):
+                mod_dir = tmp_path / mod / "test_vol_h5"
+                mod_dir.mkdir(parents=True, exist_ok=True)
+                h5_file = mod_dir / "Case2001.npy.h5"
+                with h5py.File(h5_file, "w") as f:
+                    f.create_dataset("image", data=np.zeros((128, 128, 4), dtype=np.float32))
+                    f.create_dataset("label", data=np.ones((128, 128, 4), dtype=np.int64))
+                    f.create_dataset("spacing", data=np.array([1.0, 1.0, 2.5], dtype=np.float32))
+
+            ds = MyoPSTestDataset(split_file=split_file, data_root=tmp_path, dataset="myopspp")
+            self.assertEqual(len(ds), 1)
+            sample = ds[0]
+            self.assertEqual(sample["case_id"], "Case2001")
+            self.assertIn("spacing", sample)
+            np.testing.assert_allclose(sample["spacing"].numpy(), [1.0, 1.0, 2.5])
 
 
 if __name__ == "__main__":
