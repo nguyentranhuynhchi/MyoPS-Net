@@ -1,6 +1,6 @@
 {
   "schema_version": "efficiency_metrics_v1",
-  "generated_at_utc": "2026-11-15T06:39:22.368900+00:00",
+  "generated_at_utc": "2026-11-15T08:10:10.013889+00:00",
   "model_name": "MyoPS-Net",
   "model_id": "myopsnet",
   "seed": 1234,
@@ -12,7 +12,9 @@
   },
   "rule_compliant": false,
   "compliance_warnings": [
-    "Running on CPU; benchmark rule requires 01 NVIDIA A100 GPU."
+    "Running on CPU; benchmark rule requires 01 NVIDIA A100 GPU.",
+    "AMP mode is 'auto', rule requires pure FP32 (--amp none).",
+    "num_workers=4, rule requires --num_workers 0."
   ],
   "environment": {
     "device": "cpu",
@@ -20,10 +22,10 @@
     "visible_gpu_count": 0,
     "pytorch_version": "2.13.0+cpu",
     "cuda_version": null,
-    "amp_mode": "none",
-    "precision": "fp32",
-    "num_workers": 0,
-    "pin_memory": true,
+    "amp_mode": "auto",
+    "precision": "auto",
+    "num_workers": 4,
+    "pin_memory": false,
     "batch_size": 16,
     "planned_epochs": 300
   },
@@ -32,7 +34,7 @@
     "Trainable Params (M)": 119.28,
     "Total Params (M)": 119.28,
     "FLOPs (G)": 112.49,
-    "Inference Latency (ms/slice)": 762.21,
+    "Inference Latency (ms/slice)": 716.62,
     "Inference Peak VRAM (MB)": 0.0,
     "Inference Peak VRAM (GB)": 0.0,
     "Training Time / Epoch (s)": null,
@@ -70,8 +72,8 @@
     "dtype": "float32",
     "warmup_runs": 2,
     "measure_runs": 5,
-    "latency_ms": 762.2143,
-    "latency_ms_per_slice": 762.2143,
+    "latency_ms": 716.6213,
+    "latency_ms_per_slice": 716.6213,
     "peak_vram_bytes": 0,
     "peak_vram_mb": 0.0,
     "peak_vram_gb": 0.0,
